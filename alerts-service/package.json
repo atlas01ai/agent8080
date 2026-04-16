@@ -1,0 +1,27 @@
+{
+  "name": "agent-claw-wallet-alerts",
+  "version": "1.0.0",
+  "description": "Base L2 whale alerts + Aave liquidation monitoring",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "migrate": "node src/db/migrate.js",
+    "test": "node --test tests/*.test.js",
+    "dev": "node --watch src/index.js",
+    "deploy:staging": "./scripts/deploy-staging.sh",
+    "deploy:production": "./scripts/deploy-production.sh",
+    "status": "cat data/health.json 2>/dev/null || echo 'Health check not available'",
+    "logs": "tail -f logs/alerts-service.log"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.9.0",
+    "sqlite3": "^6.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

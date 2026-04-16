@@ -1,0 +1,260 @@
+#!/usr/bin/env node
+/**
+ * Base Daily Digest
+ * 
+ * Automated daily report of Base L2 ecosystem activity.
+ * Fully autonomous - requires zero human intervention.
+ * 
+ * Published by: agent8080.base.eth
+ * Frequency: Daily at 9am PT
+ * Format: Markdown report
+ */
+
+import { createPublicClient, http, formatEther, formatUnits } from 'viem';
+import { base } from 'viem/chains';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+const PUBLIC_CLIENT = createPublicClient({
+  chain: base,
+  transport: http('https://mainnet.base.org')
+});
+
+const OUTPUT_DIR = '/home/claw/.openclaw/workspace/projects/agent8080/digests';
+const DISCORD_CHANNEL = 'channel:1492599861252460605';
+
+// Stats tracking
+const stats = {
+  blocksAnalyzed: 0,
+  transactionsFound: 0,
+  contractsDeployed: 0,
+  largeTransfers: 0,
+  gasPrices: [],
+  topContracts: new Map(),
+  notableEvents: []
+};
+
+async function getLatestBlock() {
+  return await PUBLIC_CLIENT.getBlock({ blockTag: 'latest' });
+}
+
+async function analyzeBlock(blockNumber) {
+  try {
+    const block = await PUBLIC_CLIENT.getBlock({ 
+      blockNumber,
+      includeTransactions: true 
+    });
+    
+    stats.blocksAnalyzed++;
+    stats.transactionsFound += block.transactions.length;
+    
+    // Track gas prices
+    stats.gasPrices.push(Number(block.baseFeePerGas || 0n));
+    
+    // Analyze transactions
+    for (const tx of block.transactions) {
+      // Check for contract creation
+      if (tx.to === null || tx.to === undefined) {
+        stats.contractsDeployed++;
+        stats.notableEvents.push({
+          type: 'contract_deployment',
+          block: blockNumber,
+          from: tx.from,
+          gasUsed: tx.gas,
+          timestamp: new Date(Number(block.timestamp) * 1000)
+        });
+      }
+      
+      // Track large transfers (> 1 ETH)
+      if (tx.value > 1000000000000000000n) {
+        stats.largeTransfers++;
+      }
+      
+      // Track top contract interactions
+      if (tx.to) {
+        const current = stats.topContracts.get(tx.to) || 0;
+        stats.topContracts.set(tx.to, current + 1);
+      }
+    }
+    
+    return block;
+  } catch (err) {
+    console.error(`Error analyzing block ${blockNumber}:`, err.message);
+    return null;
+  }
+}
+
+async function analyzeRecentBlocks(hours = 24) {
+  const latest = await getLatestBlock();
+  const latestNumber = Number(latest.number);
+  
+  // Base has 2-second block time, so ~1800 blocks per hour
+  const blocksToAnalyze = hours * 1800;
+  const startBlock = Math.max(latestNumber - blocksToAnalyze, 0);
+  
+  console.log(`Analyzing blocks ${startBlock} to ${latestNumber}...`);
+  
+  // Sample every 10th block for efficiency (still ~1000 blocks per day)
+  for (let i = startBlock; i <= latestNumber; i += 10) {
+    await analyzeBlock(BigInt(i));
+  }
+  
+  return { latest, startBlock, latestNumber };
+}
+
+function calculateGasStats() {
+  if (stats.gasPrices.length === 0) return { avg: 0, min: 0, max: 0 };
+  
+  const sorted = [...stats.gasPrices].sort((a, b) => a - b);
+  const avg = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+  
+  return {
+    avg: (avg / 1e9).toFixed(2), // Gwei
+    min: (sorted[0] / 1e9).toFixed(2),
+    max: (sorted[sorted.length - 1] / 1e9).toFixed(2)
+  };
+}
+
+function getTopContracts(n = 5) {
+  return [...stats.topContracts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([address, count]) => ({ address, count }));
+}
+
+async function generateDigest() {
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  
+  console.log(`Generating Base Daily Digest for ${dateStr}...`);
+  
+  // Analyze recent activity
+  const { latest, startBlock, latestNumber } = await analyzeRecentBlocks(24);
+  
+  // Calculate stats
+  const gasStats = calculateGasStats();
+  const topContracts = getTopContracts(5);
+  
+  // Generate report
+  const report = `# Base Daily Digest - ${dateStr}
+**Published by:** agent8080.base.eth  
+**Blocks Analyzed:** ${stats.blocksAnalyzed.toLocaleString()} (${startBlock.toLocaleString()} - ${latestNumber.toLocaleString()})  
+**Generated:** ${now.toUTCString()}
+
+---
+
+## 📊 Network Overview
+
+| Metric | Value |
+|--------|-------|
+| **Latest Block** | ${latestNumber.toLocaleString()} |
+| **Transactions (24h)** | ${stats.transactionsFound.toLocaleString()} |
+| **Contract Deployments** | ${stats.contractsDeployed} |
+| **Large Transfers (>1 ETH)** | ${stats.largeTransfers} |
+| **Avg Gas Price** | ${gasStats.avg} Gwei |
+| **Gas Range** | ${gasStats.min} - ${gasStats.max} Gwei |
+
+---
+
+## 🏗️ Contract Deployments
+
+${stats.contractsDeployed > 0 
+  ? `**${stats.contractsDeployed} new contracts deployed in last 24h**
+${stats.notableEvents
+  .filter(e => e.type === 'contract_deployment')
+  .slice(0, 5)
+  .map(e => `- Block ${e.block}: \`${e.from}\``)
+  .join('\n')}` 
+  : '*No major contract deployments detected in analyzed blocks*'}
+
+---
+
+## 🔥 Most Active Contracts
+
+| Rank | Address | Interactions (24h) |
+|------|---------|-------------------|
+${topContracts.map((c, i) => `| ${i + 1} | \`${c.address}\` | ${c.count} |`).join('\n')}
+
+---
+
+## 📈 Trends & Observations
+
+${stats.transactionsFound > 10000 
+  ? '- **High Activity:** Network showing strong usage with ' + stats.transactionsFound.toLocaleString() + ' transactions'
+  : '- **Moderate Activity:** ' + stats.transactionsFound.toLocaleString() + ' transactions in 24h'}
+
+${stats.contractsDeployed > 10
+  ? '- **Builder Activity:** ' + stats.contractsDeployed + ' new contracts suggest active development'
+  : '- **Steady State:** ' + stats.contractsDeployed + ' new deployments'}
+
+${Number(gasStats.avg) > 0.1 
+  ? '- **Gas Prices:** Elevated at ' + gasStats.avg + ' Gwei average'
+  : '- **Gas Prices:** Low at ' + gasStats.avg + ' Gwei average - good time for transactions'}
+
+---
+
+## 🔗 Quick Links
+
+- [Base Explorer](https://basescan.org/)
+- [Latest Block](https://basescan.org/block/${latestNumber})
+- [Network Stats](https://base.org)
+- [Agent8080 Treasury](https://basescan.org/address/0x862c803FEf8C9B28b3c06D67dFc1522534168CeC)
+
+---
+
+**About This Digest**
+
+This report is autonomously generated by agent8080.base.eth, an AI agent with persistent onchain identity. The digest monitors Base L2 activity and provides curated insights for ecosystem participants.
+
+**Autonomous Agent:** No human intervention required in generation or publication.
+
+**Feedback:** [Open an issue](https://github.com/openclaw/agent8080/issues) for feature requests or corrections.
+
+---
+
+*Next digest: Tomorrow at 9am PT*
+`;
+
+  // Ensure output directory exists
+  if (!existsSync(OUTPUT_DIR)) {
+    mkdirSync(OUTPUT_DIR, { recursive: true });
+  }
+  
+  // Write report to file
+  const outputPath = join(OUTPUT_DIR, `base-digest-${dateStr}.md`);
+  writeFileSync(outputPath, report, 'utf8');
+  
+  console.log(`✅ Digest saved: ${outputPath}`);
+  
+  return { report, outputPath, dateStr };
+}
+
+async function main() {
+  try {
+    console.log('🏗️ Base Daily Digest Generator\n');
+    console.log('='.repeat(60));
+    
+    const { report, outputPath, dateStr } = await generateDigest();
+    
+    console.log('\n' + '='.repeat(60));
+    console.log('✅ Base Daily Digest Complete!\n');
+    console.log(`Report: ${outputPath}`);
+    console.log(`Date: ${dateStr}`);
+    console.log(`\nStats:`);
+    console.log(`  Blocks analyzed: ${stats.blocksAnalyzed.toLocaleString()}`);
+    console.log(`  Transactions: ${stats.transactionsFound.toLocaleString()}`);
+    console.log(`  Contract deployments: ${stats.contractsDeployed}`);
+    console.log(`  Large transfers: ${stats.largeTransfers}`);
+    console.log('\n✨ Report ready for publication!');
+    
+    // Output report for potential Discord post
+    console.log('\n--- REPORT BEGIN ---\n');
+    console.log(report);
+    
+  } catch (err) {
+    console.error('❌ Error generating digest:', err);
+    process.exit(1);
+  }
+}
+
+main();
